@@ -1,0 +1,22 @@
+#Python
+venv/
+__pycache__/
+*.pyc
+*.pyo       
+*.pyd
+*.pdb
+.Python
+# Database
+*.db
+*.db-journal
+# IDEs and editors
+.vscode/
+./.idea/
+*.swp
+*.swo
+#OS files
+
+.DS_Store
+Thumbs.db
+#environment files
+.env
