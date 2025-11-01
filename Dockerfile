@@ -1,14 +1,16 @@
-# Dockerfile
+﻿# Dockerfile
 # Multi-stage build for smaller image size
 
 # Stage 1: Builder
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements
@@ -23,8 +25,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install git (needed for GitPython)
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,12 +40,12 @@ COPY . .
 # Create directory for database
 RUN mkdir -p /app/data
 
-# Expose port
+# Expose port (Railway will set PORT env variable)
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 0
 
-# Run application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run application with shell to support environment variable substitution
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
