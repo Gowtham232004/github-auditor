@@ -1,49 +1,110 @@
 """
 main.py
-FastAPI application for GitHub Auditor
-Day 1: Basic profile analysis and storage
+GitHub Auditor API - Production Ready
+Day 3: Polished with rate limiting, logging, monitoring, error handling
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict
+from fastapi.responses import JSONResponse
+from typing import Dict, Optional
 from datetime import datetime
+import time
 
 # Import our modules
 import github_api
 import database
+import git_analyzer
+from config import config
+from logger import logger, log_api_request, log_analysis_start, log_analysis_complete, log_error
+from rate_limiter import check_rate_limit, rate_limiter
+from health_monitor import health_monitor
 
 # ============================================
 # CREATE FASTAPI APP
 # ============================================
 
 app = FastAPI(
-    title="GitHub Auditor API",
-    description="Analyze GitHub profiles for authenticity",
-    version="1.0.0 - Day 1",
+    title=config.API_TITLE,
+    description="Analyze GitHub profiles for authenticity and detect portfolio farming",
+    version=config.API_VERSION,
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    debug=config.DEBUG_MODE
 )
 
-# Add CORS middleware (allows frontend to call API)
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify actual origins
+    allow_origins=["*"] if config.DEBUG_MODE else ["https://yourdomain.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ============================================
+# MIDDLEWARE
+# ============================================
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests and add rate limit headers"""
+    start_time = time.time()
+    
+    # Increment request counter
+    health_monitor.increment_requests()
+    
+    # Get client IP
+    client_ip = request.client.host
+    
+    # Log request
+    log_api_request(request.url.path, ip=client_ip)
+    
+    # Process request
+    try:
+        response = await call_next(request)
+        
+        # Add rate limit headers
+        rate_info = rate_limiter.get_info(client_ip)
+        response.headers["X-RateLimit-Limit"] = str(rate_info["limit"])
+        response.headers["X-RateLimit-Remaining"] = str(rate_info["remaining"])
+        response.headers["X-RateLimit-Reset"] = str(rate_info["reset_in_seconds"])
+        
+        # Log response time
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(round(process_time, 3))
+        
+        return response
+        
+    except Exception as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Request to {request.url.path}")
+        raise
+
+# ============================================
 # STARTUP EVENT
 # ============================================
 
 @app.on_event("startup")
-def startup_event():
-    """Initialize database when app starts"""
-    print("🚀 Starting GitHub Auditor API...")
+async def startup_event():
+    """Initialize on startup"""
+    logger.info("="*50)
+    logger.info("🚀 Starting GitHub Auditor API...")
+    logger.info("="*50)
+    
+    # Print configuration
+    config.print_config()
+    
+    # Initialize database
     database.initialize_database()
-    print("✅ API ready!")
+    
+    logger.info("✅ API ready and listening for requests")
+    logger.info("="*50)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("👋 Shutting down GitHub Auditor API...")
 
 # ============================================
 # ROOT ENDPOINT
@@ -51,139 +112,117 @@ def startup_event():
 
 @app.get("/")
 def root():
-    """
-    API information and available endpoints
-    """
+    """API information and available endpoints"""
     return {
-        "name": "GitHub Auditor API",
-        "version": "1.0.0",
+        "name": config.API_TITLE,
+        "version": config.API_VERSION,
         "status": "running",
+        "environment": config.ENVIRONMENT,
         "endpoints": {
             "/": "API information",
-            "/health": "Health check",
+            "/health": "Basic health check",
+            "/health/detailed": "Detailed system health",
             "/analyze/{username}": "Analyze GitHub profile",
+            "/analyze-repo": "Analyze single repository",
+            "/analyze-all/{username}": "Deep analysis (all repos)",
             "/profile/{username}": "Get stored profile",
+            "/repo-analyses/{username}": "Get stored repo analyses",
             "/history": "Get all analyzed profiles",
-            "/stats": "Get database statistics",
+            "/stats": "Database statistics",
             "/docs": "Interactive API documentation"
+        },
+        "rate_limit": {
+            "limit": config.RATE_LIMIT_PER_HOUR,
+            "window": "1 hour"
         },
         "github": "https://github.com/yourusername/github-auditor",
         "documentation": "/docs"
     }
 
 # ============================================
-# HEALTH CHECK
+# HEALTH CHECK ENDPOINTS
 # ============================================
 
 @app.get("/health")
 def health_check():
-    """
-    Health check endpoint
-    Returns API status and timestamp
-    """
+    """Basic health check"""
+    is_healthy = health_monitor.is_healthy()
+    
     return {
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "unhealthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "github-auditor-api"
+        "version": config.API_VERSION
     }
 
+@app.get("/health/detailed")
+def detailed_health_check():
+    """Detailed system health with metrics"""
+    return health_monitor.get_complete_health()
+
 # ============================================
-# MAIN ANALYSIS ENDPOINT
+# PROFILE ANALYSIS ENDPOINTS
 # ============================================
 
-@app.get("/analyze/{username}")
-def analyze_profile(username: str):
+@app.get("/analyze/{username}", dependencies=[Depends(check_rate_limit)])
+async def analyze_profile(username: str):
     """
-    Analyze a GitHub profile
+    Analyze a GitHub profile (basic analysis)
     
-    This endpoint:
-    1. Fetches profile from GitHub API
-    2. Fetches repositories
-    3. Calculates statistics
-    4. Saves to database
-    5. Returns analysis
-    
-    Args:
-        username: GitHub username to analyze
-        
-    Returns:
-        Complete analysis with profile and statistics
-        
-    Example:
-        GET /analyze/torvalds
+    Rate limited to prevent abuse
     """
+    start_time = time.time()
     
-    # Validate username
     if not username or len(username) < 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Username cannot be empty"
-        )
+        raise HTTPException(status_code=400, detail="Username cannot be empty")
     
     try:
+        log_analysis_start(username, "profile")
+        
         # Perform analysis
-        print(f"🔍 Analyzing GitHub user: {username}")
         analysis = github_api.analyze_github_user(username)
         
         # Save to database
         save_success = database.save_analysis(username, analysis)
         
-        if not save_success:
-            print(f"⚠  Analysis completed but failed to save to database")
+        # Increment counter
+        health_monitor.increment_analyses()
         
-        # Add metadata
-        result = {
+        # Log completion
+        duration = time.time() - start_time
+        log_analysis_complete(username, "profile", duration)
+        
+        return {
             "username": username,
             "analyzed_at": datetime.now().isoformat(),
             "saved_to_database": save_success,
+            "analysis_time_seconds": round(duration, 2),
             "data": analysis
         }
         
-        return result
-        
     except github_api.GitHubAPIError as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Profile analysis for {username}")
         raise HTTPException(
             status_code=404 if "not found" in str(e).lower() else 500,
             detail=str(e)
         )
     
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
-
-# ============================================
-# GET STORED PROFILE
-# ============================================
+        health_monitor.increment_errors()
+        log_error(e, f"Profile analysis for {username}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/profile/{username}")
 def get_stored_profile(username: str):
-    """
-    Get previously analyzed profile from database
-    
-    Returns the most recent analysis without making new GitHub API calls
-    
-    Args:
-        username: GitHub username
-        
-    Returns:
-        Stored profile and statistics
-        
-    Example:
-        GET /profile/torvalds
-    """
-    
-    # Get profile from database
+    """Get previously analyzed profile from database"""
     profile = database.get_profile(username)
     
     if not profile:
         raise HTTPException(
             status_code=404,
-            detail=f"Profile '{username}' not found in database. Try /analyze/{username} first."
+            detail=f"Profile '{username}' not found. Try /analyze/{username} first."
         )
     
-    # Get latest statistics
     stats = database.get_latest_statistics(username)
     
     return {
@@ -194,24 +233,173 @@ def get_stored_profile(username: str):
     }
 
 # ============================================
-# GET ALL PROFILES
+# REPOSITORY ANALYSIS ENDPOINTS
+# ============================================
+
+@app.post("/analyze-repo", dependencies=[Depends(check_rate_limit)])
+async def analyze_repository_endpoint(repo_url: str, username: Optional[str] = None):
+    """
+    Analyze a single repository's commits
+    
+    Rate limited - takes 10-30 seconds per repo
+    """
+    start_time = time.time()
+    
+    if not repo_url or "github.com" not in repo_url:
+        raise HTTPException(status_code=400, detail="Invalid GitHub repository URL")
+    
+    try:
+        repo_name = repo_url.rstrip('/').split('/')[-1]
+        
+        logger.info(f"🔍 Analyzing repository: {repo_name}")
+        
+        # Perform Git analysis
+        analysis = git_analyzer.analyze_repository(repo_url)
+        
+        if "error" in analysis:
+            raise HTTPException(status_code=500, detail=f"Analysis failed: {analysis['error']}")
+        
+        # Save to database if username provided
+        saved = False
+        if username:
+            saved = database.save_repository_analysis(username, repo_name, repo_url, analysis)
+        
+        # Increment counter
+        health_monitor.increment_analyses()
+        
+        duration = time.time() - start_time
+        logger.info(f"✅ Repository analysis complete: {repo_name} (took {duration:.2f}s)")
+        
+        return {
+            "repository": repo_name,
+            "url": repo_url,
+            "saved_to_database": saved,
+            "analysis_time_seconds": round(duration, 2),
+            "analysis": analysis
+        }
+        
+    except git_analyzer.GitAnalysisError as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Repository analysis for {repo_url}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    except Exception as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Repository analysis for {repo_url}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+@app.get("/analyze-all/{username}", dependencies=[Depends(check_rate_limit)])
+async def analyze_all_repositories(username: str, max_repos: int = 3):
+    """
+    Deep analysis of all user repositories
+    
+    WARNING: SLOW! Analyzes commit history for multiple repos
+    Limited to prevent timeouts
+    """
+    if max_repos > config.MAX_REPOS_PER_ANALYSIS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_repos cannot exceed {config.MAX_REPOS_PER_ANALYSIS}"
+        )
+    
+    start_time = time.time()
+    
+    try:
+        log_analysis_start(username, "deep")
+        
+        # Fetch profile
+        analysis = github_api.analyze_github_user(username)
+        database.save_analysis(username, analysis)
+        
+        # Get repositories
+        repos = github_api.fetch_user_repositories(username, max_repos)
+        
+        # Analyze each repository
+        repo_analyses = []
+        logger.info(f"📊 Analyzing {len(repos[:max_repos])} repositories...")
+        
+        for repo in repos[:max_repos]:
+            repo_url = repo['clone_url']
+            repo_name = repo['name']
+            
+            logger.info(f"  🔍 Analyzing: {repo_name}")
+            
+            try:
+                repo_analysis = git_analyzer.analyze_repository(repo_url)
+                
+                if "error" not in repo_analysis:
+                    database.save_repository_analysis(username, repo_name, repo_url, repo_analysis)
+                    repo_analyses.append({"repo_name": repo_name, "analysis": repo_analysis})
+                else:
+                    repo_analyses.append({"repo_name": repo_name, "error": repo_analysis["error"]})
+                    
+            except Exception as e:
+                logger.error(f"Failed to analyze {repo_name}: {e}")
+                repo_analyses.append({"repo_name": repo_name, "error": str(e)})
+        
+        # Calculate overall score
+        valid_scores = [
+            r["analysis"]["authenticity_score"] 
+            for r in repo_analyses 
+            if "analysis" in r and "error" not in r["analysis"]
+        ]
+        
+        overall_score = sum(valid_scores) // len(valid_scores) if valid_scores else 0
+        
+        # Increment counter
+        health_monitor.increment_analyses()
+        
+        duration = time.time() - start_time
+        log_analysis_complete(username, "deep", duration)
+        
+        return {
+            "username": username,
+            "profile": analysis["profile"],
+            "statistics": analysis["statistics"],
+            "repositories_analyzed": len(repo_analyses),
+            "repository_analyses": repo_analyses,
+            "overall_authenticity_score": overall_score,
+            "analysis_time_seconds": round(duration, 2),
+            "analyzed_at": datetime.now().isoformat()
+        }
+        
+    except github_api.GitHubAPIError as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Deep analysis for {username}")
+        raise HTTPException(
+            status_code=404 if "not found" in str(e).lower() else 500,
+            detail=str(e)
+        )
+    
+    except Exception as e:
+        health_monitor.increment_errors()
+        log_error(e, f"Deep analysis for {username}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@app.get("/repo-analyses/{username}")
+def get_user_repo_analyses(username: str):
+    """Get all stored repository analyses"""
+    analyses = database.get_repository_analyses(username)
+    
+    if not analyses:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No repository analyses found for '{username}'"
+        )
+    
+    return {
+        "username": username,
+        "total_repositories_analyzed": len(analyses),
+        "repositories": analyses
+    }
+
+# ============================================
+# HISTORY & STATS ENDPOINTS
 # ============================================
 
 @app.get("/history")
 def get_analysis_history():
-    """
-    Get all analyzed profiles from database
-    
-    Returns list of all profiles that have been analyzed,
-    ordered by most recently analyzed first
-    
-    Returns:
-        List of profiles with basic info
-        
-    Example:
-        GET /history
-    """
-    
+    """Get all analyzed profiles"""
     profiles = database.get_all_profiles()
     
     return {
@@ -219,90 +407,15 @@ def get_analysis_history():
         "profiles": profiles
     }
 
-# ============================================
-# DATABASE STATISTICS
-# ============================================
-
-@app.get("/stats")
-def get_statistics():
-    """
-    Get overall database statistics
-    
-    Returns:
-        - Total profiles analyzed
-        - Total analyses performed
-        - Most common languages
-        
-    Example:
-        GET /stats
-    """
-    
-    stats = database.get_database_stats()
-    
-    return {
-        "database_statistics": stats,
-        "timestamp": datetime.now().isoformat()
-    }
-
-# ============================================
-# DELETE PROFILE (BONUS)
-# ============================================
-
-@app.delete("/profile/{username}")
-def delete_stored_profile(username: str):
-    """
-    Delete profile and all associated data from database
-    
-    Args:
-        username: GitHub username to delete
-        
-    Returns:
-        Success message
-        
-    Example:
-        DELETE /profile/test_user
-    """
-    
-    success = database.delete_profile(username)
-    
-    if not success:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Profile '{username}' not found in database"
-        )
-    
-    return {
-        "message": f"Profile '{username}' deleted successfully",
-        "deleted": True
-    }
-
-# ============================================
-# USER ANALYSIS HISTORY
-# ============================================
-
 @app.get("/history/{username}")
 def get_user_history(username: str):
-    """
-    Get analysis history for specific user
-    
-    Shows how the user's stats have changed over time
-    
-    Args:
-        username: GitHub username
-        
-    Returns:
-        List of all analyses for this user
-        
-    Example:
-        GET /history/torvalds
-    """
-    
+    """Get analysis history for specific user"""
     history = database.get_analysis_history(username)
     
     if not history:
         raise HTTPException(
             status_code=404,
-            detail=f"No analysis history found for '{username}'"
+            detail=f"No history found for '{username}'"
         )
     
     return {
@@ -311,33 +424,69 @@ def get_user_history(username: str):
         "history": history
     }
 
+@app.get("/stats")
+def get_statistics():
+    """Get database statistics"""
+    stats = database.get_database_stats()
+    
+    return {
+        "database_statistics": stats,
+        "api_statistics": health_monitor.get_api_stats(),
+        "timestamp": datetime.now().isoformat()
+    }
+
 # ============================================
-# ERROR HANDLERS
+# DELETE ENDPOINT
 # ============================================
 
-from fastapi.responses import JSONResponse
+@app.delete("/profile/{username}")
+def delete_stored_profile(username: str):
+    """Delete profile from database"""
+    success = database.delete_profile(username)
+    
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Profile '{username}' not found"
+        )
+    
+    return {
+        "message": f"Profile '{username}' deleted successfully",
+        "deleted": True
+    }
 
-@app.exception_handler(404)
-async def not_found_handler(request, exc):
-    """Custom 404 handler"""
+# ============================================
+# GLOBAL ERROR HANDLERS
+# ============================================
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Custom HTTP exception handler"""
+    health_monitor.increment_errors()
     return JSONResponse(
-        status_code=404,
+        status_code=exc.status_code,
         content={
-            "error": "Not Found",
-            "detail": str(exc.detail) if hasattr(exc, 'detail') else "The requested resource was not found",
-            "status_code": 404
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "path": str(request.url.path),
+            "timestamp": datetime.now().isoformat()
         }
     )
 
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    """Custom 500 handler"""
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler"""
+    health_monitor.increment_errors()
+    log_error(exc, f"Unhandled exception at {request.url.path}")
+    
     return JSONResponse(
         status_code=500,
         content={
-            "error": "Internal Server Error",
-            "detail": str(exc),
-            "status_code": 500
+            "error": "Internal server error",
+            "message": str(exc) if config.DEBUG_MODE else "An unexpected error occurred",
+            "status_code": 500,
+            "path": str(request.url.path),
+            "timestamp": datetime.now().isoformat()
         }
     )
 
@@ -348,18 +497,18 @@ async def internal_error_handler(request, exc):
 if __name__ == "__main__":
     import uvicorn
     
-    print("="*50)
-    print("🚀 Starting GitHub Auditor API")
-    print("="*50)
-    print("📝 API Docs: http://localhost:8000/docs")
-    print("🔄 Redoc: http://localhost:8000/redoc")
-    print("💻 API: http://localhost:8000")
-    print("="*50)
+    logger.info("="*50)
+    logger.info("🚀 Starting GitHub Auditor API")
+    logger.info("="*50)
+    logger.info(f"📝 API Docs: http://localhost:{config.API_PORT}/docs")
+    logger.info(f"🔄 Redoc: http://localhost:{config.API_PORT}/redoc")
+    logger.info(f"💻 API: http://localhost:{config.API_PORT}")
+    logger.info("="*50)
     
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,  # Auto-reload on code changes
-        log_level="info"
+        host=config.API_HOST,
+        port=int(os.getenv("PORT", config.API_PORT)),
+        reload=config.DEBUG_MODE,
+        log_level=config.LOG_LEVEL.lower()
     )

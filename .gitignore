@@ -15,8 +15,32 @@ __pycache__/
 *.swp
 *.swo
 #OS files
+venv/
+env/
+ENV/
+
 
 .DS_Store
 Thumbs.db
 #environment files
 .env
+.env.local
+
+#Docker
+.dockerignore
+#lOGS
+*.log
+app.log
+#IDE
+.vscode/
+.idea/
+*.swp
+#OS
+.DS_Store
+Thumbs.db
+#Backup files
+*_old.py
+*_backup.py
+#Docker
+.dockerignore
+
