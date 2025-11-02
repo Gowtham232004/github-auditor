@@ -83,7 +83,7 @@ def log_analysis_complete(username: str, analysis_type: str, duration_seconds: f
 
 def log_error(error: Exception, context: str = ""):
     """Log error with context"""
-    logger.error(f"Error in {context}: {type(error)._name_}: {str(error)}")
+    logger.error(f"Error in {context}: {type(error).__name__}: {str(error)}")
 
 
 if __name__ == "__main__":
