@@ -148,6 +148,97 @@ def save_analysis(username: str, analysis_data: Dict) -> bool:
         conn.close()
 
 
+def save_repository_analysis(username: str, repo_name: str, repo_url: str, analysis: Dict) -> bool:
+    """
+    Save individual repository analysis to database
+    
+    Args:
+        username: GitHub username
+        repo_name: Repository name
+        repo_url: Repository URL
+        analysis: Repository analysis dictionary
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Create repo_analyses table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS repo_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                repo_url TEXT NOT NULL,
+                analysis_json TEXT NOT NULL,
+                analyzed_at TEXT NOT NULL,
+                UNIQUE(username, repo_name)
+            )
+        ''')
+        
+        timestamp = datetime.now().isoformat()
+        
+        # Insert or replace repository analysis
+        cursor.execute('''
+            INSERT OR REPLACE INTO repo_analyses 
+            (username, repo_name, repo_url, analysis_json, analyzed_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            username,
+            repo_name,
+            repo_url,
+            json.dumps(analysis),
+            timestamp
+        ))
+        
+        conn.commit()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error saving repository analysis: {e}")
+        conn.rollback()
+        return False
+        
+    finally:
+        conn.close()
+
+
+def get_repository_analyses(username: str) -> List[Dict]:
+    """
+    Get all repository analyses for a user
+    
+    Args:
+        username: GitHub username
+        
+    Returns:
+        List of repository analysis dictionaries
+    """
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT * FROM repo_analyses
+        WHERE username = ?
+        ORDER BY analyzed_at DESC
+    ''', (username,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    results = []
+    for row in rows:
+        repo = dict(row)
+        if repo.get('analysis_json'):
+            repo['analysis'] = json.loads(repo['analysis_json'])
+        results.append(repo)
+    
+    return results
+
+
 def get_profile(username: str) -> Optional[Dict]:
     """
     Get profile from database
