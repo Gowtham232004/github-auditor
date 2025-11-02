@@ -35,9 +35,19 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+allowed_origins = [
+    "http://localhost:3000",  # Local development
+    "http://localhost:5173",  # Vite development
+    "https://github-auditor.onrender.com",  # Render backend (for testing)
+    os.getenv("FRONTEND_URL", "https://yourdomain.vercel.app"),  # Vercel frontend
+]
+
+if config.DEBUG_MODE:
+    allowed_origins.append("*")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if config.DEBUG_MODE else ["https://yourdomain.com"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -322,8 +332,19 @@ async def analyze_all_repositories(username: str, max_repos: int = 3):
         for repo in repos[:max_repos]:
             repo_url = repo['clone_url']
             repo_name = repo['name']
+            repo_size_kb = repo.get('size', 0)  # Size in KB from GitHub API
             
-            logger.info(f"  🔍 Analyzing: {repo_name}")
+            # Skip repos larger than 100MB (100,000 KB) to avoid timeouts
+            if repo_size_kb > 100000:
+                logger.warning(f"  ⏭️  Skipping {repo_name}: Too large ({repo_size_kb/1024:.1f}MB)")
+                repo_analyses.append({
+                    "repo_name": repo_name, 
+                    "skipped": True,
+                    "reason": f"Repository too large ({repo_size_kb/1024:.1f}MB), would cause timeout"
+                })
+                continue
+            
+            logger.info(f"  🔍 Analyzing: {repo_name} ({repo_size_kb/1024:.1f}MB)")
             
             try:
                 repo_analysis = git_analyzer.analyze_repository(repo_url)
