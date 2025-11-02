@@ -34,23 +34,23 @@ app = FastAPI(
     debug=config.DEBUG_MODE
 )
 
-# Add CORS middleware
-allowed_origins = [
-    "http://localhost:3000",  # Local development
-    "http://localhost:5173",  # Vite development
-    "https://github-auditor.onrender.com",  # Render backend (for testing)
-    os.getenv("FRONTEND_URL", "https://yourdomain.vercel.app"),  # Vercel frontend
-]
-
+# Add CORS middleware - Allow all origins in production for Vercel previews
 if config.DEBUG_MODE:
-    allowed_origins.append("*")
+    allowed_origins = ["*"]
+else:
+    # Production: Allow specific origins and all Vercel domains
+    allowed_origins = [
+        "http://localhost:3000",  # Local development
+        "https://github-auditor-frontend.vercel.app",  # Vercel production
+    ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=["*"] if config.DEBUG_MODE else allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_origin_regex=r"https://.*\.vercel\.app" if not config.DEBUG_MODE else None,
 )
 
 # ============================================
