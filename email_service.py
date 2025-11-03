@@ -1,4 +1,4 @@
-﻿"""
+"""
 email_service.py
 Send analysis reports via Gmail SMTP
 """
@@ -149,10 +149,7 @@ def send_analysis_email(to_email: str, username: str, analysis_data: Dict) -> bo
         
         # Connect to Gmail SMTP server
         print(f" Connecting to Gmail SMTP...")
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             
             # Login
             print(f" Logging in...")
@@ -188,3 +185,4 @@ if __name__ == "__main__":
     
     result = send_analysis_email('test@example.com', 'test_user', test_data)
     print(f"Test result: {'Success' if result else 'Failed'}")
+
