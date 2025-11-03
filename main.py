@@ -11,6 +11,7 @@ from typing import Dict, Optional
 from datetime import datetime
 import time
 import os
+import re
 
 # Import our modules
 import github_api
@@ -20,6 +21,9 @@ from config import config
 from logger import logger, log_api_request, log_analysis_start, log_analysis_complete, log_error
 from rate_limiter import check_rate_limit, rate_limiter
 from health_monitor import health_monitor
+# Add this import at the top of main.py
+import ai_insights
+import email_service
 
 # ============================================
 # CREATE FASTAPI APP
@@ -126,6 +130,8 @@ def root():
             "/analyze/{username}": "Analyze GitHub profile",
             "/analyze-repo": "Analyze single repository",
             "/analyze-all/{username}": "Deep analysis (all repos)",
+            "/analyze-ai/{username}": "AI-powered profile analysis",
+            "/email-report": "Send analysis report via email",
             "/profile/{username}": "Get stored profile",
             "/repo-analyses/{username}": "Get stored repo analyses",
             "/history": "Get all analyzed profiles",
@@ -364,7 +370,40 @@ async def analyze_all_repositories(username: str, max_repos: int = 3):
         duration = time.time() - start_time
         log_analysis_complete(username, "deep", duration)
         
-        return {
+        # Generate AI insights if we have analysis data
+        ai_analysis = None
+        try:
+            if repo_analyses and any("analysis" in r for r in repo_analyses):
+                # Get data from first successful analysis
+                first_analysis = next((r["analysis"] for r in repo_analyses if "analysis" in r), None)
+                if first_analysis:
+                    commit_data = first_analysis.get("commit_analysis", {})
+                    all_red_flags = []
+                    for r in repo_analyses:
+                        if "analysis" in r:
+                            all_red_flags.extend(r["analysis"].get("red_flags", []))
+                    
+                    logger.info("Generating AI insights...")
+                    ai_summary = ai_insights.generate_profile_insights(
+                        analysis["profile"],
+                        commit_data,
+                        all_red_flags
+                    )
+                    recommendation = ai_insights.generate_recommendation(overall_score, all_red_flags)
+                    behavior_patterns = ai_insights.analyze_commit_behavior(commit_data)
+                    
+                    ai_analysis = {
+                        "summary": ai_summary.get("summary", ""),
+                        "generated_by": ai_summary.get("generated_by", "Analysis System"),
+                        "confidence": ai_summary.get("confidence", "medium"),
+                        "recommendation": recommendation,
+                        "behavior_patterns": behavior_patterns
+                    }
+        except Exception as e:
+            logger.error(f"AI insights generation failed: {e}")
+            # Continue without AI insights
+
+        result = {
             "username": username,
             "profile": analysis["profile"],
             "statistics": analysis["statistics"],
@@ -374,6 +413,12 @@ async def analyze_all_repositories(username: str, max_repos: int = 3):
             "analysis_time_seconds": round(duration, 2),
             "analyzed_at": datetime.now().isoformat()
         }
+        
+        # Add AI insights if generated
+        if ai_analysis:
+            result["ai_insights"] = ai_analysis
+            
+        return result
         
     except github_api.GitHubAPIError as e:
         health_monitor.increment_errors()
@@ -448,6 +493,110 @@ def get_statistics():
     }
 
 # ============================================
+# AI-POWERED ANALYSIS ENDPOINT
+# ============================================
+
+@app.get("/analyze-ai/{username}", dependencies=[Depends(check_rate_limit)])
+async def analyze_with_ai_insights(username: str):
+    """
+    Analyze GitHub profile with AI-powered insights
+    
+    Returns profile analysis + GPT-generated assessment
+    Includes hiring recommendation and behavior patterns
+    """
+    
+    start_time = time.time()
+    
+    try:
+        log_analysis_start(username, "ai-powered")
+        
+        # Get basic profile analysis
+        analysis = github_api.analyze_github_user(username)
+        profile = analysis['profile']
+        stats = analysis['statistics']
+        
+        # Get commit analysis from first repository
+        repos = github_api.fetch_user_repositories(username, 1)
+        
+        if repos and len(repos) > 0:
+            repo_url = repos[0]['clone_url']
+            logger.info(f"Analyzing repository: {repos[0]['name']}")
+            
+            try:
+                repo_analysis = git_analyzer.analyze_repository(repo_url)
+                
+                if "error" not in repo_analysis:
+                    commit_data = repo_analysis['commit_analysis']
+                    red_flags = repo_analysis['red_flags']
+                    auth_score = repo_analysis['authenticity_score']
+                else:
+                    commit_data = {}
+                    red_flags = []
+                    auth_score = 50
+                    
+            except Exception as e:
+                logger.error(f"Repository analysis failed: {e}")
+                commit_data = {}
+                red_flags = []
+                auth_score = 50
+        else:
+            commit_data = {}
+            red_flags = []
+            auth_score = 50
+        
+        # Generate AI insights
+        logger.info("Generating AI insights...")
+        ai_analysis = ai_insights.generate_profile_insights(
+            profile,
+            commit_data,
+            red_flags
+        )
+        
+        # Generate recommendation
+        recommendation = ai_insights.generate_recommendation(auth_score, red_flags)
+        
+        # Analyze behavior patterns
+        behavior_patterns = ai_insights.analyze_commit_behavior(commit_data)
+        
+        # Save to database
+        database.save_analysis(username, analysis)
+        
+        health_monitor.increment_analyses()
+        
+        duration = time.time() - start_time
+        log_analysis_complete(username, "ai-powered", duration)
+        
+        return {
+            "username": username,
+            "profile": profile,
+            "statistics": stats,
+            "authenticity_score": auth_score,
+            "red_flags": red_flags,
+            "commit_analysis": commit_data,
+            "ai_insights": ai_analysis,
+            "recommendation": recommendation,
+            "behavior_patterns": behavior_patterns,
+            "analysis_time_seconds": round(duration, 2),
+            "analyzed_at": datetime.now().isoformat()
+        }
+        
+    except github_api.GitHubAPIError as e:
+        health_monitor.increment_errors()
+        log_error(e, f"AI analysis for {username}")
+        raise HTTPException(
+            status_code=404 if "not found" in str(e).lower() else 500,
+            detail=str(e)
+        )
+    
+    except Exception as e:
+        health_monitor.increment_errors()
+        log_error(e, f"AI analysis for {username}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {str(e)}"
+        )
+
+# ============================================
 # DELETE ENDPOINT
 # ============================================
 
@@ -466,6 +615,78 @@ def delete_stored_profile(username: str):
         "message": f"Profile '{username}' deleted successfully",
         "deleted": True
     }
+
+# ============================================
+# EMAIL SERVICE ENDPOINT
+# ============================================
+
+@app.post("/email-report", dependencies=[Depends(check_rate_limit)])
+async def send_email_report(username: str, email: str):
+    """
+    Send analysis report via email
+    
+    Args:
+        username: GitHub username to analyze
+        email: Recipient email address
+    """
+    
+    # Validate email format
+    email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_regex, email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    
+    try:
+        # Get analysis (use cached if available)
+        try:
+            profile_data = database.get_profile(username)
+            stats = database.get_latest_statistics(username)
+            repo_analyses = database.get_repository_analyses(username)
+            
+            if not profile_data:
+                # Analyze if not in database
+                analysis = github_api.analyze_github_user(username)
+                database.save_analysis(username, analysis)
+                profile_data = analysis['profile']
+                stats = analysis['statistics']
+                repo_analyses = []
+            
+        except Exception as e:
+            # Fresh analysis if database fails
+            analysis = github_api.analyze_github_user(username)
+            database.save_analysis(username, analysis)
+            profile_data = analysis['profile']
+            stats = analysis['statistics']
+            repo_analyses = []
+        
+        # Prepare data for email
+        email_data = {
+            'profile': profile_data,
+            'statistics': stats,
+            'authenticity_score': 75,  # Calculate properly based on your logic
+            'red_flags': []  # Get from repo_analyses
+        }
+        
+        # Send email
+        success = email_service.send_analysis_email(email, username, email_data)
+        
+        if success:
+            return {
+                "message": f"Analysis report sent to {email}",
+                "username": username,
+                "sent_at": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to send email. Check SendGrid configuration."
+            )
+            
+    except Exception as e:
+        log_error(e, f"Email report for {username}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send report: {str(e)}"
+        )
 
 # ============================================
 # GLOBAL ERROR HANDLERS
@@ -501,6 +722,25 @@ async def general_exception_handler(request: Request, exc: Exception):
             "timestamp": datetime.now().isoformat()
         }
     )
+    
+@app.post("/email-report")
+async def email_report(username: str, email: str):
+    '''Send analysis report via email'''
+    try:
+        # Get analysis
+        analysis = await analyze_profile(username)
+        
+        # Send email
+        success = email_service.send_analysis_email(email, username, analysis)
+        
+        if success:
+            return {"message": f"Report sent to {email}"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send email")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # RUN SERVER
