@@ -6,3 +6,4 @@ python-dotenv==1.0.0
 psutil==7.1.2
 openai==2.6.1
 sendgrid==6.12.5
+resend>=2.19.0
