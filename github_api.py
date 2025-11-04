@@ -5,9 +5,10 @@ Handles all GitHub API interactions
 
 import requests
 from typing import Optional, Dict, List
+from config import config
 
 # GitHub API base URL
-GITHUB_API_BASE = "https://api.github.com"
+GITHUB_API_BASE = config.GITHUB_API_BASE
 
 class GitHubAPIError(Exception):
     """Custom exception for GitHub API errors"""
@@ -28,9 +29,10 @@ def fetch_user_profile(username: str) -> Optional[Dict]:
     """
     
     url = f"{GITHUB_API_BASE}/users/{username}"
+    headers = config.get_github_headers()
     
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 404:
             raise GitHubAPIError(f"User '{username}' not found on GitHub")
@@ -66,6 +68,7 @@ def fetch_user_repositories(username: str, max_repos: int = 100) -> List[Dict]:
     """
     
     url = f"{GITHUB_API_BASE}/users/{username}/repos"
+    headers = config.get_github_headers()
     params = {
         "per_page": min(max_repos, 100),  # GitHub max is 100 per page
         "sort": "updated",
@@ -73,7 +76,7 @@ def fetch_user_repositories(username: str, max_repos: int = 100) -> List[Dict]:
     }
     
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, headers=headers, params=params, timeout=10)
         
         if response.status_code != 200:
             raise GitHubAPIError(f"Failed to fetch repositories: {response.status_code}")
