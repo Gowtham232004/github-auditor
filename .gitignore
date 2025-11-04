@@ -41,6 +41,23 @@ Thumbs.db
 #Backup files
 *_old.py
 *_backup.py
+*.backup
+*.backup2
+*.old_resend
+*.sendgrid_backup
+
+# Test files
+test_*.py
+check_*.py
+simple_test.py
+final_check.py
+fix_*.py
+
+# Documentation files (keep only README.md)
+DEPLOYMENT_READY.md
+STATUS.md
+SYSTEM_CHECK_REPORT.txt
+
 #Docker
 .dockerignore
 
