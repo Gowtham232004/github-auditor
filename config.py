@@ -55,7 +55,18 @@ class Config:
         }
         
         if cls.GITHUB_TOKEN:
-            headers["Authorization"] = f"token {cls.GITHUB_TOKEN}"
+            # Support both classic tokens (token) and fine-grained tokens (Bearer)
+            # GitHub API accepts both formats
+            token = cls.GITHUB_TOKEN.strip()
+            if token.startswith('ghp_'):
+                # Classic Personal Access Token
+                headers["Authorization"] = f"token {token}"
+            elif token.startswith('github_pat_'):
+                # Fine-grained Personal Access Token
+                headers["Authorization"] = f"token {token}"
+            else:
+                # Default to token format
+                headers["Authorization"] = f"token {token}"
         
         return headers
     

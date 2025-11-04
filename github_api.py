@@ -37,8 +37,15 @@ def fetch_user_profile(username: str) -> Optional[Dict]:
         if response.status_code == 404:
             raise GitHubAPIError(f"User '{username}' not found on GitHub")
         
+        if response.status_code == 401:
+            raise GitHubAPIError("GitHub API authentication failed - Invalid or missing token")
+        
         if response.status_code == 403:
-            raise GitHubAPIError("GitHub API rate limit exceeded")
+            # Check if it's rate limit or token permission issue
+            if 'X-RateLimit-Remaining' in response.headers and response.headers['X-RateLimit-Remaining'] == '0':
+                raise GitHubAPIError("GitHub API rate limit exceeded")
+            else:
+                raise GitHubAPIError("GitHub API access forbidden - Check token permissions")
         
         if response.status_code != 200:
             raise GitHubAPIError(f"GitHub API error: {response.status_code}")
